@@ -1,3 +1,11 @@
+import torch
+import cv2
+import numpy as np
+import os
+import matplotlib.pyplot as plt
+from models.superpoint import SuperPoint
+from models.superglue import SuperGlue
+
 class GroundTruthGenerator:
     """
     Orchestrates the workflow for processing RGB and Thermal image pairs.
@@ -17,7 +25,7 @@ class GroundTruthGenerator:
     - For interactive user interface (UI), tools like Google Colab's ipywidgets can be used.
     """
 
-    def __init__(self, data_dir: str, backend_dir: str, debug: bool = False):
+    def __init__(self, data_dir: str, backend_dir: str, device: str = "cuda" if torch.cuda.is_available() else "cpu", debug: bool = False):
         """
         Initializes the GroundTruthGenerator with specified directories and instantiates
         helper components.
@@ -27,6 +35,25 @@ class GroundTruthGenerator:
             backend_dir (str): Directory where the ground truth files will be saved.
             debug (bool): If True, prints debug information.
         """
+
+        self.device = device
+        self.debug = debug
+
+        # SuperPoint Model Configuration
+        self.sp_config = {
+            'nms_radius': 4,
+            'keypoint_threshold': 0.005,
+            'max_keypoints': 1024
+        }
+        self.superpoint = SuperPoint(self.sp_config).eval().to(self.device)
+
+        # SuperGlue Model Configuration
+        self.sg_config = {'weights': 'indoor'}
+        self.superglue = SuperGlue(self.sg_config).eval().to(self.device)
+
+        if self.debug:
+            print(f"[GroundTruthGenerator] Models loaded on {self.device}")
+            
         self.data_dir = data_dir
         self.backend_dir = backend_dir
         self.debug = debug
@@ -61,25 +88,63 @@ class GroundTruthGenerator:
 
         # Step 1: Load the image pair
         rgb_image, thermal_image = self.image_loader.load_image_pair(pair_id)
+
+        org_rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
+        org_thermal_image = cv2.cvtColor(thermal_image, cv2.COLOR_BGR2RGB)
+
+        grayscale_rgb_image = cv2.cvtColor(org_rgb_image, cv2.COLOR_BGR2GRAY)
+        grayscale_thermal_image = cv2.cvtColor(org_thermal_image, cv2.COLOR_BGR2GRAY)
+
+        grayscale_rgb_image = grayscale_rgb_image.astype(np.float32) / 255.0
+        grayscale_thermal_image = grayscale_thermal_image.astype(np.float32) / 255.0
+
+        grayscale_rgb_image = torch.from_numpy(grayscale_rgb_image).unsqueeze(0).unsqueeze(0).to(self.device)
+        grayscale_thermal_image = torch.from_numpy(grayscale_thermal_image).unsqueeze(0).unsqueeze(0).to(self.device)
+
         if debug:
-            print(f"[DEBUG] Loaded images for pair {pair_id}: RGB image: {rgb_image}, Thermal image: {thermal_image}")
+            print(f"[DEBUG] Loaded images for pair {pair_id}: RGB image: {org_rgb_image}, Thermal image: {org_thermal_image}")
+            print(f"[DEBUG] Loaded grayscale images for pair {pair_id}: RGB image: {grayscale_rgb_image}, Thermal image: {grayscale_thermal_image}")
 
         # Step 2: Extract keypoints and descriptors from each image
-        keypoints_rgb, descriptors_rgb = self.sp_extractor.extract_keypoints(rgb_image)
-        keypoints_thermal, descriptors_thermal = self.sp_extractor.extract_keypoints(thermal_image)
+        kpts1, desc1, scores1 = self.sp_extractor.extract_keypoints(grayscale_rgb_image)
+        kpts2, desc2, scores2 = self.sp_extractor.extract_keypoints(grayscale_thermal_image)
         if debug:
-            print(f"[DEBUG] Extracted keypoints for RGB: {keypoints_rgb} and Thermal: {keypoints_thermal}")
+            print(f"[DEBUG] Extracted keypoints for RGB: {kpts1} and Thermal: {kpts2}")
+            print(f"[DEBUG] Extracted descriptors for RGB: {desc1} and Thermal: {desc2}")
 
-        # Step 3: Compute matches using SuperGlue
-        matches = self.sg_matcher.match_keypoints(
-            (keypoints_rgb, descriptors_rgb),
-            (keypoints_thermal, descriptors_thermal)
-        )
+        # Ensure keypoints and scores have a batch dimension:
+        kpts1 = kpts1.unsqueeze(0)  # from [N,2] to [1,N,2]
+        kpts2 = kpts2.unsqueeze(0)
+        scores1 = scores1.unsqueeze(0)  # from [N] to [1,N]
+        scores2 = scores2.unsqueeze(0)
+
+        # Prepare data dictionary according to the SuperGlue protocol.
+        data = {
+            'image0': grayscale_rgb_image, 
+            'image1': grayscale_thermal_image,
+            'keypoints0': kpts1, 
+            'keypoints1': kpts2,
+            'descriptors0': desc1, 
+            'descriptors1': desc2,
+            'scores0': scores1, 
+            'scores1': scores2
+        }
+
+        # IMPORTANT: Make sure that scores are 2D (shape [B, N]) and NOT already unsqueezed to [B, N, 1].
+        # The official SuperGlue protocol expects scores of shape [B, N] so that inside the model they get unsqueezed.
+        if data['scores0'].dim() == 3:
+            data['scores0'] = data['scores0'].squeeze(-1)
+        if data['scores1'].dim() == 3:
+            data['scores1'] = data['scores1'].squeeze(-1)
+
+        # Now pass the data dictionary to the SuperGlue matcher.
+        matches = self.sg_matcher.match_keypoints(data)
+
         if debug:
             print(f"[DEBUG] Computed matches: {matches}")
 
         # Step 4: Visualize matches and perform UI-based quality control
-        visualizer = MatchVisualizer(rgb_image, thermal_image, matches)
+        visualizer = MatchVisualizer(org_rgb_image, org_thermal_image, matches)
         visualizer.display_matches()
         if debug:
             print(f"[DEBUG] Displayed matches. Awaiting user confirmation for match selection...")
@@ -142,11 +207,6 @@ class GroundTruthGenerator:
             print(f"[DEBUG] Retrieved pair identifiers: {pair_ids}")
         return pair_ids
 
-import os
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
-
 def point_line_distance(point, line_start, line_end):
     """
     Computes the distance from a point to a line segment defined by line_start and line_end.
@@ -177,15 +237,14 @@ def point_line_distance(point, line_start, line_end):
 # ---------------------------------
 class ImageLoader:
     """
-    Loads RGB and Thermal image pairs from a directory.
+    Loads RGB and Thermal image pairs from a dataset folder with separate subfolders.
     
     Expected file naming convention:
-        For a given pair_id, images are named as:
-          - {pair_id}_rgb.jpg (or .png)
-          - {pair_id}_thermal.jpg (or .png)
+        - RGB images: dataset/rgb/{pair_id}.jpg
+        - Thermal images: dataset/thermal/{pair_id}.jpg
     """
     def __init__(self, data_dir: str, debug: bool = False):
-        self.data_dir = data_dir
+        self.data_dir = data_dir  # e.g., "dataset"
         self.debug = debug
         if self.debug:
             print(f"[DEBUG] ImageLoader initialized with directory: {data_dir}")
@@ -201,8 +260,8 @@ class ImageLoader:
         Returns:
             tuple: (rgb_image, thermal_image) as numpy arrays.
         """
-        rgb_path = os.path.join(self.data_dir, f"{pair_id}_rgb.jpg")
-        thermal_path = os.path.join(self.data_dir, f"{pair_id}_thermal.jpg")
+        rgb_path = os.path.join(self.data_dir, "rgb", f"{pair_id}.jpg")
+        thermal_path = os.path.join(self.data_dir, "thermal", f"{pair_id}.jpg")
         
         if debug or self.debug:
             print(f"[DEBUG] Loading RGB image from: {rgb_path}")
@@ -210,18 +269,18 @@ class ImageLoader:
         
         rgb_image = cv2.imread(rgb_path)
         thermal_image = cv2.imread(thermal_path)
+
+        rgb_image = cv2.resize(rgb_image, (640, 480))
+        thermal_image = cv2.resize(thermal_image, (640, 480))
         
         if rgb_image is None or thermal_image is None:
             raise FileNotFoundError(f"Could not load images for pair {pair_id}")
-        
-        # Optionally convert BGR (OpenCV) to RGB for visualization.
-        rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
-        thermal_image = cv2.cvtColor(thermal_image, cv2.COLOR_BGR2RGB)
         
         if debug or self.debug:
             print(f"[DEBUG] Loaded images shapes: RGB {rgb_image.shape}, Thermal {thermal_image.shape}")
         
         return rgb_image, thermal_image
+
 
 # ---------------------------------
 # Dependency 2: SuperPointExtractor
@@ -235,6 +294,14 @@ class SuperPointExtractor:
     def __init__(self, debug: bool = False):
         self.orb = cv2.ORB_create()
         self.debug = debug
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # SuperPoint Model Configuration
+        self.sp_config = {
+            'nms_radius': 4,
+            'keypoint_threshold': 0.005,
+            'max_keypoints': 1024
+        }
+        self.superpoint = SuperPoint(self.sp_config).eval().to(self.device)
         if self.debug:
             print("[DEBUG] SuperPointExtractor (using ORB) initialized.")
     
@@ -251,12 +318,22 @@ class SuperPointExtractor:
                    keypoints: list of cv2.KeyPoint objects.
                    descriptors: numpy array of descriptors.
         """
-        if debug or self.debug:
-            print("[DEBUG] Extracting keypoints and descriptors.")
-        keypoints, descriptors = self.orb.detectAndCompute(image, None)
-        if debug or self.debug:
-            print(f"[DEBUG] Extracted {len(keypoints)} keypoints.")
-        return keypoints, descriptors
+        if image is None:
+            raise ValueError(f"Failed to load image.")
+        
+        # Now, pass it to the SuperPoint model
+        with torch.no_grad():
+            output = self.superpoint({'image': image})
+
+        keypoints = output['keypoints'][0].cpu()
+        descriptors = output['descriptors'][0].cpu()
+        scores = output['scores'][0].cpu()
+        
+        if self.debug:
+            print(f"[GroundTruthGenerator] Extracted {len(keypoints)} keypoints.")
+            print(f"[GroundTruthGenerator] Computed {descriptors.shape[0]} descriptors.")
+
+        return keypoints, descriptors, scores
 
 # ---------------------------------
 # Dependency 3: SuperGlueMatcher
@@ -270,10 +347,14 @@ class SuperGlueMatcher:
     def __init__(self, debug: bool = False):
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.debug = debug
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # SuperGlue Model Configuration
+        self.sg_config = {'weights': 'indoor'}
+        self.superglue = SuperGlue(self.sg_config).eval().to(self.device)
         if self.debug:
             print("[DEBUG] SuperGlueMatcher (using BFMatcher) initialized.")
     
-    def match_keypoints(self, rgb_data, thermal_data, debug: bool = False):
+    def match_keypoints(self, data, debug: bool = False):
         """
         Matches keypoints between RGB and Thermal images.
         
@@ -285,25 +366,33 @@ class SuperGlueMatcher:
         Returns:
             list: A list of match tuples: [((x_rgb, y_rgb), (x_thermal, y_thermal)), ...]
         """
-        keypoints_rgb, descriptors_rgb = rgb_data
-        keypoints_thermal, descriptors_thermal = thermal_data
+        with torch.no_grad():
+            # Get raw match indices from SuperGlue; shape [N]
+            raw_matches = self.superglue(data)['matches0'][0].cpu().numpy()
+
+        if self.debug or debug:
+            num_valid = np.sum(raw_matches > -1)
+            print(f"[DEBUG] Found {num_valid} valid matches out of {raw_matches.shape[0]} keypoints.")
+
+        # Retrieve keypoints from the data dictionary.
+        keypoints0 = data['keypoints0'][0].cpu().numpy()  # shape [N, 2]
+        keypoints1 = data['keypoints1'][0].cpu().numpy()  # shape [M, 2]
         
-        if debug or self.debug:
-            print("[DEBUG] Matching keypoints using BFMatcher.")
-        
-        raw_matches = self.bf.match(descriptors_rgb, descriptors_thermal)
-        raw_matches = sorted(raw_matches, key=lambda m: m.distance)
-        
-        matches = []
-        for m in raw_matches:
-            pt_rgb = keypoints_rgb[m.queryIdx].pt
-            pt_thermal = keypoints_thermal[m.trainIdx].pt
-            matches.append((pt_rgb, pt_thermal))
-        
-        if debug or self.debug:
-            print(f"[DEBUG] Found {len(matches)} matches.")
-        
-        return matches
+        # Convert match indices to coordinate pairs.
+        match_pairs = []
+        for i, match_idx in enumerate(raw_matches):
+            if match_idx > -1:
+                pt0 = keypoints0[i]
+                pt1 = keypoints1[int(match_idx)]
+                match_pairs.append((pt0, pt1))
+            else:
+                # Optionally skip or log unmatched keypoints.
+                continue
+
+        if self.debug or debug:
+            print(f"[DEBUG] Converted matches to {len(match_pairs)} coordinate pairs.")
+
+        return match_pairs
 
 # ---------------------------------
 # Dependency 4: MatchVisualizer
