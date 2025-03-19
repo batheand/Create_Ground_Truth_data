@@ -169,11 +169,10 @@ class GroundTruthGenerator:
             print(f"[DEBUG] Computed matches: {matches}")
 
         # Use the new UI:
+        # modifications start from here
         # Step 4: Visualize matches and perform UI-based quality control
         visualizer_ui = MatchVisualizerUI(org_rgb_image, org_thermal_image, matches, self.on_matches_selected)
         visualizer_ui.show()
-
-
 
         """
         # Step 4: Visualize matches and perform UI-based quality control
@@ -217,7 +216,7 @@ class GroundTruthGenerator:
             if debug:
                 print(f"[DEBUG] Processing next image pair: {pair_id}")
             self.process_image_pair(pair_id, debug=debug)
-            input("Press Enter to load the next image pair...")
+            #input("Press Enter to load the next image pair...")
         if debug:
             print("[DEBUG] Completed processing all image pairs.")
 
