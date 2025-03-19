@@ -67,6 +67,30 @@ class GroundTruthGenerator:
         self.sg_matcher = SuperGlueMatcher()
         self.file_writer = GroundTruthFileWriter(backend_dir)
 
+        self.current_pair_id = None
+    
+    def on_matches_selected(self, selected_matches):
+        """
+        Callback function to handle user-selected matches.
+
+        Args:
+            selected_matches (list): List of approved matches after UI selection.
+        """
+        if self.debug:
+            print(f"[DEBUG] User approved {len(selected_matches)} matches.")
+
+
+        if not hasattr(self, "current_pair_id"):
+            print("[ERROR] current_pair_id is not set before saving matches.")
+            return
+        
+        self.file_writer.write_ground_truth_file(self.current_pair_id, selected_matches)
+
+
+        if self.debug:
+            print(f"[DEBUG] Ground truth file written for pair: {self.current_pair_id}")
+
+
     def process_image_pair(self, pair_id: str, debug: bool = False):
         """
         Processes a single image pair using the following steps:
@@ -85,7 +109,8 @@ class GroundTruthGenerator:
         """
         if debug:
             print(f"[DEBUG] Starting processing for image pair: {pair_id}")
-
+        
+        self.current_pair_id = pair_id  # Ensure this is set before UI interaction
         # Step 1: Load the image pair
         rgb_image, thermal_image = self.image_loader.load_image_pair(pair_id)
 
@@ -143,6 +168,13 @@ class GroundTruthGenerator:
         if debug:
             print(f"[DEBUG] Computed matches: {matches}")
 
+        # Use the new UI:
+        # Step 4: Visualize matches and perform UI-based quality control
+        visualizer_ui = MatchVisualizerUI(org_rgb_image, org_thermal_image, matches, self.on_matches_selected)
+        visualizer_ui.show()
+
+
+        """
         # Step 4: Visualize matches and perform UI-based quality control
         visualizer = MatchVisualizer(org_rgb_image, org_thermal_image, matches)
         visualizer.display_matches()
@@ -163,6 +195,7 @@ class GroundTruthGenerator:
         visualizer.show_confirmation()
         if debug:
             print(f"[DEBUG] Displayed confirmation to user for pair: {pair_id}")
+        """
 
     def run(self, debug: bool = False):
         """
@@ -397,6 +430,155 @@ class SuperGlueMatcher:
 # ---------------------------------
 # Dependency 4: MatchVisualizer
 # ---------------------------------
+import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
+import numpy as np
+
+def point_line_distance(point, line_start, line_end):
+    """
+    Computes the perpendicular distance from a point to a line segment.
+    """
+    point = np.array(point)
+    line_start = np.array(line_start)
+    line_end = np.array(line_end)
+    if np.all(line_start == line_end):
+        return np.linalg.norm(point - line_start)
+    
+    line_vec = line_end - line_start
+    point_vec = point - line_start
+    line_len = np.dot(line_vec, line_vec)
+    t = np.clip(np.dot(point_vec, line_vec) / line_len, 0, 1)
+    projection = line_start + t * line_vec
+    return np.linalg.norm(point - projection)
+
+import tkinter as tk
+from tkinter import Button, Canvas
+import cv2
+from PIL import Image, ImageTk
+import numpy as np
+
+class MatchVisualizerUI:
+
+    def __init__(self, rgb_image, thermal_image, matches, save_callback):
+        self.rgb_image = rgb_image
+        self.thermal_image = thermal_image
+        self.matches = matches
+        self.save_callback = save_callback
+        
+        self.root = tk.Tk()
+        self.root.title("Match Visualizer")
+        
+        # Convert images to Tkinter format
+        self.rgb_tk_image = self.convert_to_tk_image(self.rgb_image)
+        self.thermal_tk_image = self.convert_to_tk_image(self.thermal_image)
+        
+        # Create canvases
+        self.canvas_rgb = Canvas(self.root, width=self.rgb_tk_image.width(), height=self.rgb_tk_image.height())
+        self.canvas_rgb.pack(side=tk.LEFT)
+        self.canvas_rgb.create_image(0, 0, anchor=tk.NW, image=self.rgb_tk_image)
+        
+        self.canvas_thermal = Canvas(self.root, width=self.thermal_tk_image.width(), height=self.thermal_tk_image.height())
+        self.canvas_thermal.pack(side=tk.RIGHT)
+        self.canvas_thermal.create_image(0, 0, anchor=tk.NW, image=self.thermal_tk_image)
+        
+        # Draw matches
+        self.draw_matches()
+        
+        # Save button
+        self.save_button = Button(self.root, text="Save Matches", command=self.save_matches)
+        self.save_button.pack()
+            
+    def convert_to_tk_image(self, cv_image):
+        """Convert OpenCV image to Tkinter-compatible image."""
+        cv_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(cv_image)
+        return ImageTk.PhotoImage(image)
+    
+    def draw_matches(self):
+        """Draw matching points on both images."""
+        for match in self.matches:
+            pt_rgb, pt_thermal = match  # Assuming match is a tuple of (x, y) points
+            x1, y1 = int(pt_rgb[0]), int(pt_rgb[1])
+            x2, y2 = int(pt_thermal[0]), int(pt_thermal[1])
+            
+            self.canvas_rgb.create_oval(x1-2, y1-2, x1+2, y1+2, fill='red')
+            self.canvas_thermal.create_oval(x2-2, y2-2, x2+2, y2+2, fill='red')
+    
+    def save_matches(self):
+        """Call the save callback function with selected matches."""
+        self.save_callback(self.matches)
+        self.root.quit()
+    
+    def show(self):
+        self.root.mainloop()
+
+    def display_images(self):
+        rgb_img = Image.fromarray(cv2.cvtColor(self.rgb_image, cv2.COLOR_BGR2RGB))
+        thermal_img = Image.fromarray(cv2.cvtColor(self.thermal_image, cv2.COLOR_BGR2RGB))
+        
+        self.rgb_tk = ImageTk.PhotoImage(rgb_img)
+        self.thermal_tk = ImageTk.PhotoImage(thermal_img)
+        
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=self.rgb_tk)
+        self.canvas.create_image(self.width_rgb, 0, anchor=tk.NW, image=self.thermal_tk)
+
+    def create_match_lines(self):
+        self.match_objects = []
+        for idx, (pt_rgb, pt_thermal) in enumerate(self.matches):
+            x1, y1 = pt_rgb
+            x2, y2 = pt_thermal[0] + self.width_rgb, pt_thermal[1]
+            line = self.canvas.create_line(x1, y1, x2, y2, fill="gray", width=2, tags=("line", idx))
+            self.match_objects.append((idx, x1, y1, x2, y2, line))
+            
+            # Create small circles for better hover and click detection
+            circle1 = self.canvas.create_oval(x1-5, y1-5, x1+5, y1+5, fill="gray", outline="")
+            circle2 = self.canvas.create_oval(x2-5, y2-5, x2+5, y2+5, fill="gray", outline="")
+            self.match_objects.append((idx, circle1, circle2))
+
+    def on_hover(self, event):
+        hovered = False
+        for obj in self.match_objects:
+            if len(obj) == 6:  # Line object
+                idx, x1, y1, x2, y2, line = obj
+                if self.is_near(event.x, event.y, x1, y1) or self.is_near(event.x, event.y, x2, y2):
+                    self.canvas.itemconfig(line, fill="blue")
+                    self.status_label.config(text=f"Hovering over match {idx}")
+                    hovered = True
+                elif idx not in self.selected_matches:
+                    self.canvas.itemconfig(line, fill="gray")
+        if not hovered:
+            self.reset_line_colors()
+
+    def on_click(self, event):
+        for obj in self.match_objects:
+            if len(obj) == 6:  # Line object
+                idx, x1, y1, x2, y2, line = obj
+                if self.is_near(event.x, event.y, x1, y1) or self.is_near(event.x, event.y, x2, y2):
+                    if idx in self.selected_matches:
+                        self.selected_matches.remove(idx)
+                        self.canvas.itemconfig(line, fill="gray")
+                    else:
+                        self.selected_matches.add(idx)
+                        self.canvas.itemconfig(line, fill="green")
+                    return
+
+    def is_near(self, x, y, px, py, threshold=10):
+        return abs(x - px) < threshold and abs(y - py) < threshold
+
+    def reset_line_colors(self):
+        for obj in self.match_objects:
+            if len(obj) == 6:  # Line object
+                idx, _, _, _, _, line = obj
+                if idx in self.selected_matches:
+                    self.canvas.itemconfig(line, fill="green")
+                else:
+                    self.canvas.itemconfig(line, fill="gray")
+        self.status_label.config(text="Hover over a match to see details.")
+
+    def end_visualization(self):
+        self.save_callback(self.selected_matches)
+        self.root.destroy()
+
 class MatchVisualizer:
     """
     Visualizes matches between RGB and Thermal images and allows interactive selection.
