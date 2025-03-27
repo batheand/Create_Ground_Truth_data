@@ -25,15 +25,9 @@ def main():
     pair_ids = [os.path.splitext(f)[0] for f in os.listdir(rgb_dir) if f.endswith(".jpg")]
     
     # Instantiate the GroundTruthGenerator
-    generator = GroundTruthGenerator()
-    
-    for pair_id in pair_ids:
-        print(f'Processing pair: {pair_id}')
-        generator.generate(os.path.join(args.dataset_dir, "rgb", f"{pair_id}.jpg"),
-                           os.path.join(args.dataset_dir, "thermal", f"{pair_id}.jpg"),
-                           os.path.join(args.output_dir, f"{pair_id}.npz"))
-    
-    print(f'Ground truth files saved in {args.output_dir}')
+    generator = GroundTruthGenerator(args.dataset_dir, args.output_dir, pair_ids)
+
+    generator.run()
 
 if __name__ == "__main__":
     main()

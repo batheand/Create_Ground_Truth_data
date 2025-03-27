@@ -53,7 +53,7 @@ class GroundTruthGenerator:
       5. Upon user confirmation, writes the approved matches to a ground truth file in the SuperGlue format.
       6. Waits for a 'Next' command from the user to process the next image pair.
     """
-    def __init__(self, data_dir: str, backend_dir: str, 
+    def __init__(self, data_dir: str, backend_dir: str, pair_ids: list,
                  device: str = "cuda" if torch.cuda.is_available() else "cpu", 
                  debug: bool = False):
         self.device = device
@@ -76,6 +76,7 @@ class GroundTruthGenerator:
             
         self.data_dir = data_dir
         self.backend_dir = backend_dir
+        self.pair_ids = pair_ids
 
         if self.debug:
             print(f"[DEBUG] Initializing GroundTruthGenerator with data_dir: {data_dir} and backend_dir: {backend_dir}")
@@ -162,7 +163,7 @@ class GroundTruthGenerator:
     def run(self, debug: bool = False):
         if debug:
             print("[DEBUG] Starting main processing loop...")
-        pair_ids = self.get_all_pair_ids(debug=debug)
+        pair_ids = self.pair_ids
         for pair_id in pair_ids:
             if debug:
                 print(f"[DEBUG] Processing next image pair: {pair_id}")
