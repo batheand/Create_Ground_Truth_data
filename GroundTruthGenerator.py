@@ -3,8 +3,8 @@ import cv2
 import numpy as np
 import os
 import matplotlib.pyplot as plt
-from models.superpoint import SuperPoint
-from models.superglue import SuperGlue
+from SuperGluePretrainedNetwork.models.superpoint import SuperPoint
+from SuperGluePretrainedNetwork.models.superglue import SuperGlue
 from PIL import Image, ImageTk
 import tkinter as tk
 
