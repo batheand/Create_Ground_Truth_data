@@ -8,6 +8,13 @@ from models.superglue import SuperGlue
 from PIL import Image, ImageTk
 import tkinter as tk
 
+import torch
+print(torch.version.cuda)        # e.g. "11.8" or None
+print(torch.backends.cudnn.enabled)  # should be True if CUDA build
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print("device: " + device)
+
 #########################################
 # Utility Function: Point-Line Distance
 #########################################
@@ -53,10 +60,7 @@ class GroundTruthGenerator:
       5. Upon user confirmation, writes the approved matches to a ground truth file in the SuperGlue format.
       6. Waits for a 'Next' command from the user to process the next image pair.
     """
-    def __init__(self, data_dir: str, backend_dir: str, pair_ids: list,
-                 device: str = "cuda" if torch.cuda.is_available() else "cpu", 
-                 debug: bool = False):
-        self.device = device
+    def __init__(self, data_dir: str, backend_dir: str, pair_ids: list, debug: bool = False):
         self.debug = debug
 
         # SuperPoint Model Configuration
@@ -65,14 +69,14 @@ class GroundTruthGenerator:
             'keypoint_threshold': 0.005,
             'max_keypoints': 1024
         }
-        self.superpoint = SuperPoint(self.sp_config).eval().to(self.device)
+        self.superpoint = SuperPoint(self.sp_config).eval().to(device)
 
         # SuperGlue Model Configuration
         self.sg_config = {'weights': 'indoor'}
-        self.superglue = SuperGlue(self.sg_config).eval().to(self.device)
+        self.superglue = SuperGlue(self.sg_config).eval().to(device)
 
         if self.debug:
-            print(f"[GroundTruthGenerator] Models loaded on {self.device}")
+            print(f"[GroundTruthGenerator] Models loaded on {device}")
             
         self.data_dir = data_dir
         self.backend_dir = backend_dir
@@ -118,8 +122,8 @@ class GroundTruthGenerator:
         grayscale_rgb_image = grayscale_rgb_image.astype(np.float32) / 255.0
         grayscale_thermal_image = grayscale_thermal_image.astype(np.float32) / 255.0
 
-        grayscale_rgb_image = torch.from_numpy(grayscale_rgb_image).unsqueeze(0).unsqueeze(0).to(self.device)
-        grayscale_thermal_image = torch.from_numpy(grayscale_thermal_image).unsqueeze(0).unsqueeze(0).to(self.device)
+        grayscale_rgb_image = torch.from_numpy(grayscale_rgb_image).unsqueeze(0).unsqueeze(0).to(device)
+        grayscale_thermal_image = torch.from_numpy(grayscale_thermal_image).unsqueeze(0).unsqueeze(0).to(device)
 
         if debug:
             print(f"[DEBUG] Loaded images and grayscale images for pair {pair_id}.")
@@ -211,13 +215,12 @@ class SuperPointExtractor:
     def __init__(self, debug: bool = False):
         self.orb = cv2.ORB_create()
         self.debug = debug
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.sp_config = {
             'nms_radius': 4,
             'keypoint_threshold': 0.005,
             'max_keypoints': 1024
         }
-        self.superpoint = SuperPoint(self.sp_config).eval().to(self.device)
+        self.superpoint = SuperPoint(self.sp_config).eval().to(device)
         if self.debug:
             print("[DEBUG] SuperPointExtractor initialized.")
     
@@ -226,9 +229,9 @@ class SuperPointExtractor:
             raise ValueError("Failed to load image.")
         with torch.no_grad():
             output = self.superpoint({'image': image})
-        keypoints = output['keypoints'][0].cpu()
-        descriptors = output['descriptors'][0].cpu()
-        scores = output['scores'][0].cpu()
+        keypoints = output['keypoints'][0].to(device)
+        descriptors = output['descriptors'][0].to(device)
+        scores = output['scores'][0].to(device)
         if self.debug:
             print(f"[DEBUG] Extracted {len(keypoints)} keypoints.")
         return keypoints, descriptors, scores
@@ -240,9 +243,8 @@ class SuperGlueMatcher:
     def __init__(self, debug: bool = False):
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         self.debug = debug
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.sg_config = {'weights': 'indoor'}
-        self.superglue = SuperGlue(self.sg_config).eval().to(self.device)
+        self.superglue = SuperGlue(self.sg_config).eval().to(device)
         if self.debug:
             print("[DEBUG] SuperGlueMatcher initialized.")
     
